@@ -1,36 +1,38 @@
-import numpy as np
 import pandas as pd
 import requests
 import math
 from scipy import stats
-import xlsxwriter
 from statistics import mean
 import streamlit as st
-import time
-#from secrets import IEX_CLOUD_API_TOKEN
-
+import matplotlib.pyplot as plt
+from PIL import Image
 
 IEX_CLOUD_API_TOKEN = 'Tpk_059b97af715d417d9f49f50b51b1c448'
+image = Image.open('Screenshot.png')
 
 st.title("Quantitative Momentum Investing Strategy Application")
 
 st.sidebar.header("Upload Stock File")
-uploaded_file = st.sidebar.file_uploader("Please Upload a CSV File")
+st.sidebar.image(image)
+file = st.sidebar.file_uploader("Please Upload a CSV File following the format above")
 st.sidebar.header("Input Portfolio Value")
-portfolio_value = st.sidebar.number_input("Please enter the value of the portfolio: ")
+portfolio_value = st.sidebar.number_input("Please enter the value of the desired portfolio: ")
+st.sidebar.header("Input Portfolio Size")
+portfolio_size = st.sidebar.number_input("Please enter the number of stocks in the desired portfolio: ", step = 1)
 
 with st.empty():
-    while uploaded_file is None or portfolio_value == 0.0:
-        st.write("Please upload a csv file and enter a portfolio value to start the program")
+    while file is None or portfolio_value == 0.0:
+        st.write("Please upload a csv file and enter a portfolio value and size on the left sidebar to start")
+
+stocks = pd.read_csv(file)
+
+with st.empty():
+    while 'Ticker' not in stocks.columns:
+        st.write('The uploaded csv file is invalid. Please upload a csv file with the given format with "Ticker" as the header.')
     st.write("Values Recognized!")
 
-stocks = pd.read_csv(uploaded_file)
-stocks = stocks[~stocks['Ticker'].isin(['DISCA', 'HFC', 'VIAC', 'WLTW'])]
-#st.write(stocks)
-
-
 # Building a Momentum Strategy
-hqm_columns = [
+columns = [
     'Ticker',
     #'Sector',
     'Price',
@@ -43,10 +45,10 @@ hqm_columns = [
     'Three-Month Return Percentile',
     'One-Month Price Return',
     'One-Month Return Percentile',
-    'HQM Score'
+    'Score'
 ]
 
-hqm_dataframe = pd.DataFrame(columns = hqm_columns)
+df = pd.DataFrame(columns=columns)
 
 # Executing Batch API Call
 def chunks(lst, n):
@@ -55,34 +57,43 @@ def chunks(lst, n):
         yield lst[i:i + n]
 
 
-symbol_groups = list(chunks(stocks['Ticker'], 100))
-symbol_strings = []
-for i in range(0, len(symbol_groups)):
-    symbol_strings.append(','.join(symbol_groups[i]))
+batch = list(chunks(stocks['Ticker'], 100))
+tickers = []
+for i in range(0, len(batch)):
+    tickers.append(','.join(batch[i]))
 
-for symbol_string in symbol_strings:
-    batch_api_call_url = f'https://sandbox.iexapis.com/stable/stock/market/batch/?types=stats,quote&symbols={symbol_string}&token={IEX_CLOUD_API_TOKEN}'
-    data = requests.get(batch_api_call_url).json()
-    for symbol in symbol_string.split(','):
-        hqm_dataframe = hqm_dataframe.append(
-            pd.Series(
-            [
-                symbol,
-                #data[symbol]['company']['sector'],
-                data[symbol]['quote']['latestPrice'],
-                'N/A',
-                data[symbol]['stats']['year1ChangePercent'],
-                'N/A',
-                data[symbol]['stats']['month6ChangePercent'],
-                'N/A',
-                data[symbol]['stats']['month3ChangePercent'],
-                'N/A',
-                data[symbol]['stats']['month1ChangePercent'],
-                'N/A',
-                'N/A'
-            ],
-            index = hqm_columns), ignore_index = True
-        )
+invalid_stocks = []
+for ticker in tickers:
+    batch_request_url = f'https://sandbox.iexapis.com/stable/stock/market/batch/?types=stats,quote&symbols={ticker}&token={IEX_CLOUD_API_TOKEN}'
+    try:
+        response = requests.get(batch_request_url)
+        data = response.json()
+        for symbol in ticker.split(','):
+            try:
+                df = df.append(
+                    pd.Series(
+                        [
+                            symbol,
+                            # data[symbol]['company']['sector'],
+                            data[symbol]['quote']['latestPrice'],
+                            'N/A',
+                            data[symbol]['stats']['year1ChangePercent'],
+                            'N/A',
+                            data[symbol]['stats']['month6ChangePercent'],
+                            'N/A',
+                            data[symbol]['stats']['month3ChangePercent'],
+                            'N/A',
+                            data[symbol]['stats']['month1ChangePercent'],
+                            'N/A',
+                            'N/A'
+                        ],
+                        index=columns), ignore_index=True
+                )
+            except:
+                invalid_stocks.append(symbol)
+    except:
+        invalid_stocks.append(ticker)
+
 
 # Calculating Momentum Percentiles
 time_periods = [
@@ -92,54 +103,68 @@ time_periods = [
     'One-Month'
 ]
 
-for row in hqm_dataframe.index:
+for row in df.index:
     for time_period in time_periods:
-        if hqm_dataframe.loc[row, f'{time_period} Price Return'] is None:
-            hqm_dataframe.loc[row, f'{time_period} Price Return'] = 0.0
+        if df.loc[row, f'{time_period} Price Return'] is None:
+            df.loc[row, f'{time_period} Price Return'] = 0.0
 
-for row in hqm_dataframe.index:
+for row in df.index:
     for time_period in time_periods:
-        hqm_dataframe.loc[row, f'{time_period} Return Percentile'] = stats.percentileofscore(
-            hqm_dataframe[f'{time_period} Price Return'], hqm_dataframe.loc[row, f'{time_period} Price Return']) / 100
+        df.loc[row, f'{time_period} Return Percentile'] = stats.percentileofscore(
+            df[f'{time_period} Price Return'], df.loc[row, f'{time_period} Price Return']) / 100
 
-# Print each percentile score to make sure it was calculated properly
-for time_period in time_periods:
-    print(hqm_dataframe[f'{time_period} Return Percentile'])
-
-# Calculating HQM Score
-for row in hqm_dataframe.index:
+# Calculating Score
+for row in df.index:
     momentum_percentiles = []
     for time_period in time_periods:
-        momentum_percentiles.append(hqm_dataframe.loc[row, f'{time_period} Return Percentile'])
-    hqm_dataframe.loc[row, 'HQM Score'] = mean(momentum_percentiles)
+        momentum_percentiles.append(df.loc[row, f'{time_period} Return Percentile'])
+    df.loc[row, 'Score'] = mean(momentum_percentiles) * 100
 
-# Selecting 50 Best Momentum Stocks
-hqm_dataframe.sort_values('HQM Score', ascending = False, inplace = True)
-hqm_dataframe = hqm_dataframe[:50]
+# Selecting Best Momentum Stocks Based on User Input
+df.sort_values('Score', ascending=False, inplace=True)
+df = df[:portfolio_size]
 
 # Dropping columns
-hqm_dataframe.drop(columns = ['One-Year Price Return', 'One-Year Return Percentile', 'Six-Month Price Return',
+df.drop(columns=['One-Year Price Return', 'One-Year Return Percentile', 'Six-Month Price Return',
                               'Six-Month Return Percentile', 'Three-Month Price Return', 'Three-Month Return Percentile',
-                              'One-Month Price Return', 'One-Month Return Percentile',], inplace = True)
-hqm_dataframe.reset_index(drop = True)
+                              'One-Month Price Return', 'One-Month Return Percentile', ], inplace = True)
+df.reset_index(drop=True)
 
-hqm_sum = hqm_dataframe['HQM Score'].sum()
-st.write(hqm_sum)
+sumScore = df['Score'].sum()
 percent_list = []
 
-index_list = hqm_dataframe.index
+index_list = df.index
 for i in index_list:
-    portfolio_percent = hqm_dataframe['HQM Score'][i] / hqm_sum
+    portfolio_percent = df['Score'][i] / sumScore
     percent_list.append(portfolio_percent * 100)
     portfolio_alloc = portfolio_percent * float(portfolio_value)
-    hqm_dataframe.loc[i, 'Number of Shares to Buy'] = math.floor(portfolio_alloc / hqm_dataframe['Price'][i])
+    df.loc[i, 'Number of Shares to Buy'] = math.floor(portfolio_alloc / df['Price'][i])
 
-hqm_dataframe.insert(3, 'Percentage of Portfolio', percent_list)
-test = hqm_dataframe['Percentage of Portfolio'].sum()
+df.insert(3, 'Percentage of Portfolio', percent_list)
+test = df['Percentage of Portfolio'].sum()
 
-#position_size = float(portfolio_value) / len(hqm_dataframe.index)
-#for i in range(0, len(hqm_dataframe['Ticker']) - 1):
-#    hqm_dataframe.loc[i, 'Number of Shares to Buy'] = math.floor(position_size / hqm_dataframe['Price'][i])
+# Displaying Data
+st.write("The following stocks were dropped due to being invalid:", invalid_stocks)
 
-st.dataframe (hqm_dataframe)
+st.subheader('Portfolio')
+def convert_df(df):
+    # Cache the conversion to prevent computation on every rerun
+    return df.to_csv().encode('utf-8')
 
+csv = convert_df(df)
+st.download_button(
+    label="Download Portfolio",
+    data=csv,
+    file_name='portfolio.csv',
+    mime='text/csv',
+)
+
+if st.button('Generate Portfolio Pie Chart'):
+    labels = df['Ticker'].values
+    sizes = df['Percentage of Portfolio'].values
+    fig1, ax1 = plt.subplots(figsize=(10, 10))
+    ax1.pie(sizes, labels=labels, shadow='True', autopct='%.2f%%')
+    ax1.axis('equal')
+    st.pyplot(fig1)
+
+st.table(df)
